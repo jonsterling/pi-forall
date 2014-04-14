@@ -6,7 +6,7 @@
 -- | Utilities for managing a typechecking context.
 module Environment
   (
-    TcMonad, runTcMonad,
+    TcMonad, (<|>), runTcMonad,
     Env,Hint(..),
     emptyEnv,
     lookupTy, lookupTyMaybe, lookupDef, lookupHint, lookupTCon,
@@ -29,7 +29,7 @@ import Text.PrettyPrint.HughesPJ
 import Text.ParserCombinators.Parsec.Pos(SourcePos)
 import Control.Monad.Reader
 import Control.Monad.Error
-import Control.Applicative
+import Control.Applicative hiding ((<|>))
 
 import Data.List
 import Data.Maybe (listToMaybe, catMaybes)
@@ -48,6 +48,9 @@ runTcMonad :: Env -> TcMonad a -> IO (Either Err a)
 runTcMonad env m = runErrorT $
                      runReaderT (runFreshMT m) env
 
+
+(<|>) :: TcMonad a -> TcMonad a -> TcMonad a
+x <|> y = catchError x (const y)
 
 -- | Marked locations in the source code
 data SourceLocation where
@@ -102,12 +105,16 @@ lookupTyMaybe v = do
   ctx <- asks ctx
   return $ listToMaybe [ty | Sig  v' ty <- ctx, v == v']
 
+
 -- | Find the type of a name specified in the context
 -- throwing an error if the name doesn't exist
 lookupTy :: (MonadReader Env m, MonadError Err m)
          => TName -> m Term
 lookupTy v =
-  do x <- lookupTyMaybe v
+  do x <- do
+       t <- lookupTyMaybe v
+       h <- lookupHint v
+       return (h `mplus` t)
      gamma <- getLocalCtx
      case x of
        Just res -> return res
@@ -135,10 +142,6 @@ lookupTCon v = do
       if v == v'
         then return (delta,lev,Just cs)
         else  scanGamma g
-    scanGamma (AbsData v' delta lev : g) =
-      if v == v'
-         then return (delta,lev,Nothing)
-         else scanGamma g
     scanGamma (_:g) = scanGamma g
 
 -- | Find a data constructor in the context, returns a list of
@@ -155,7 +158,6 @@ lookupDConAll v = do
           Nothing -> scanGamma g
           Just c -> do more <- scanGamma g
                        return $ (v', (delta, c)) : more
-    scanGamma (AbsData v' delta lev : g) = scanGamma g
     scanGamma (_:g) = scanGamma g
 
 -- | Given the name of a data constructor and the type that it should

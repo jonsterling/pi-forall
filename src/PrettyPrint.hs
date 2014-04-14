@@ -120,11 +120,6 @@ instance Disp Decl where
            <+> text "where")
            2 (vcat $ map disp constructors)
 
-  disp (AbsData t delta lev) =
-        text "data" <+> disp t <+> disp delta <+> colon
-    <+> text "Type" <+> text (show lev)
-
-
 instance Disp ConstructorDef where
   disp (ConstructorDef _ c Empty) = text c
   disp (ConstructorDef _ c tele)  = text c <+> text "of" <+> disp tele
@@ -213,10 +208,9 @@ instance Display Arg where
               Var _       -> bindParens ep
               TCon _ []   -> bindParens ep
               Type 0      -> bindParens ep
+              TyEmpty     -> bindParens ep
               TyUnit      -> bindParens ep
               LitUnit     -> bindParens ep
-              TyBool      -> bindParens ep
-              LitBool b   -> bindParens ep
               Sigma _     -> bindParens ep
 
               Pos _ a     -> wraparg (Arg ep a)
@@ -224,7 +218,6 @@ instance Display Arg where
               DCon _ [] _ -> annotParens ep
               Prod _ _ _  -> annotParens ep
               TrustMe _   -> annotParens ep
-              Refl _      -> annotParens ep
               OrdAx _     -> annotParens ep
 
               _           -> mandatoryBindParens ep
@@ -253,6 +246,30 @@ instance Display Term where
                        return $ text "Type"
                      else
                        return $ text "Type" <+> (text $ show n)
+
+  display (TySquash t) = do
+    dt <- display t
+    return $ text "[|" <+> dt <+> text "|]"
+
+  display (Quotient t r) = do
+    dt <- display t
+    dr <- display r
+    return $ dt <+> text "//" <+> dr
+
+  display (QBox x (Annot mty)) = do
+    dx <- display x
+    case mty of
+      Nothing -> return $ text "<" <+> dx <+> text ">"
+      Just ty -> do
+        dty <- display ty
+        return $ text "<" <+> dx <+> text ":" <+> dty <+> text ">"
+
+  display (QElim p s rsp x) = do
+    dp <- display p
+    ds <- display s
+    drsp <- display rsp
+    dx <- display x
+    return $ text "expose" <+> dx <+> text "under" <+> dp <+> text "with" <+> ds <+> text "by" <+> drsp
 
   display (Pi ep bnd) = do
      lunbind bnd $ \((n,a), b) -> do
@@ -288,6 +305,16 @@ instance Display Term where
     db <- display b
     return $ da <+> text "<" <+> db
 
+  display (Trivial _) = do
+    return $ text "trivial"
+
+  display (Induction _ xs) = do
+    return $ text "induction"
+
+  display (Refl ann evidence) = do
+    dev <- display evidence
+    return $ text "refl" <+> dev
+
   display (OrdAx ann) = do
     dann <- display ann
     return $ text "ord" <+> dann
@@ -309,16 +336,12 @@ instance Display Term where
      let wrapf f = case f of
             Var _         -> id
             App _ _       -> id
-            Paren _       -> id
             Pos _ a       -> wrapf a
             Ann _ _       -> id
             TrustMe _     -> id
+            Hole _ _      -> braces
             _             -> parens
      return $ wrapf f df <+> dx
-
-  display (Paren e) = do
-     de <- display e
-     return $ (parens de)
 
   display (Pos _ e) = display e
 
@@ -352,13 +375,16 @@ instance Display Term where
                      text "by" <+> db,
                      dat]
 
-  display (TyEq a b)   = do
-      da <- display a
-      db <- display b
-      return $ da <+> text "=" <+> db
-  display (Refl mty) = do
-    da <- display mty
-    return $ text "refl" <+> da
+  display (TyEq a b s t)   = do
+    let disp' (x, Annot Nothing) = display x
+        disp' (x, Annot (Just ty)) = do
+          dx <- display x
+          dty <- display ty
+          return $ dx <+> text ":" <+> dty
+
+    da <- disp' (a, s)
+    db <- disp' (b, t)
+    return $ da <+> text "=" <+> db
 
   display (Contra ty mty)  = do
      dty <- display ty
@@ -373,6 +399,11 @@ instance Display Term where
   display (TrustMe ma)  = do
     da <- display ma
     return $ text "TRUSTME" <+> da
+
+  display (Hole n (Annot mTy))   = do
+    dn <- display n
+    da <- maybe (return $ text "??") display mTy
+    return $ text "{" <+> dn <+> text ":" <+> da <+> text "}"
 
   display (Sigma bnd) =
     lunbind bnd $ \ ((x,unembed->tyA),tyB) -> do
@@ -398,17 +429,8 @@ instance Display Term where
         <+> text "(" <+> dx <+> text "," <+> dy <+> text ")"
         <+> text "->" <+> dbody <+> dann
 
-  display (TyBool) = return $ text "Bool"
-  display (LitBool b) = return $ if b then text "True" else text "False"
-  display (If a b c ann) = do
-    da <- display a
-    db <- display b
-    dc <- display c
-    dann <- display ann
-    return $ text "if" <+> da <+> text "then" <+> db
-                <+> text "else" <+> dc <+> dann
-
   display (TyUnit) = return $ text "One"
+  display (TyEmpty) = return $ text "Zero"
   display (LitUnit) = return $ text "tt"
 
 instance Display Match where

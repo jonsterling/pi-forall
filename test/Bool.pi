@@ -1,19 +1,51 @@
-module Boolean where
+module Bool where
 
-data Boolean : Type where
-  T
-  F
+data Bool : Type where
+  true
+  false
 
-not : Boolean -> Boolean
-ind not x = case x of
-  T -> F
-  F -> T
-
-id : Boolean -> Boolean
+-- ## A demonstration of observational equality for functions
+id : Bool -> Bool
 id = \x . x
 
-notnot : Boolean -> Boolean
+idid : id = id
+idid = _
+
+not : Bool -> Bool
+ind not x = case x of
+  true -> false
+  false -> true
+
+notnot : Bool -> Bool
 notnot = \x. not (not x)
 
-test : not (not F) = F
-test = refl
+idnotnot : id = notnot
+idnotnot = refl \x y xy. induction [x,y]
+
+-- ## A demonstration of quotient types
+-- This isn't as interesting as the proper Interval type, since UIP holds in
+-- OTT (and thence it is provable that seg = refl). This type can also be written
+-- [|Bool|].
+Interval : Type
+Interval = Bool // (\x y. One)
+
+one : Interval
+one = <true>
+
+two : Interval
+two = <false>
+
+seg : one = two
+seg = refl
+
+-- It is possible to construct functions out of the interval, so long as they are
+-- continuous. In the case of quotients, this means that they must respect the
+-- quotient's equivalence relation.
+exposeInterval : Interval -> Bool
+exposeInterval = \i. expose i under \x. Bool with \x. true by \x y rpf. refl
+
+-- A demonstration that quotient elimination computes.
+testExposure : exposeInterval <true> = true
+testExposure = refl
+
+

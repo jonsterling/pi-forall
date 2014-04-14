@@ -1,0 +1,62 @@
+module Integer where
+import Nat
+import Bool
+
+data ℤ : Type where
+  zer
+  onePlus of (n:ℕ)
+  negOneMinus of (n:ℕ)
+
+iplus : ℤ -> ℤ -> ℤ
+ind iplus x = \y. case x of
+  zer -> y
+  onePlus n -> case y of
+    zer -> onePlus n
+    onePlus m -> onePlus (succ (plus n m))
+    negOneMinus m -> case (lt m n) of
+      true -> onePlus (minus n (succ m))
+      false -> case (minus m n) of
+        zero -> zer
+        succ mn -> negOneMinus mn
+  negOneMinus n -> case y of
+    zer -> negOneMinus n
+    onePlus m -> case (lt m n) of
+      true -> negOneMinus (minus n (succ m))
+      false -> case (minus m n) of
+        zero -> zer
+        succ mn -> onePlus mn
+    negOneMinus m -> negOneMinus (succ (plus n m))
+
+negate : ℤ -> ℤ
+ind negate x = case x of
+  zer -> zer
+  onePlus n -> negOneMinus n
+  negOneMinus n -> onePlus n
+
+iminus : ℤ -> ℤ -> ℤ
+iminus = \x y. iplus x (negate y)
+
+itimes : ℤ -> ℤ -> ℤ
+ind itimes x = \y. case x of
+  zer -> zer
+  onePlus n -> case y of
+    zer -> zer
+    onePlus m -> onePlus (pred (times (succ n) (succ m)))
+    negOneMinus m -> negOneMinus (pred (times (succ n) (succ m)))
+  negOneMinus n -> case y of
+    zer -> zer
+    onePlus m -> negOneMinus (pred (times (succ n) (succ m)))
+    negOneMinus m -> onePlus (pred (times (succ n) (succ m)))
+
+pos : ℕ -> ℤ
+pos = \x. case x of
+  zero -> zer
+  succ n -> onePlus n
+
+neg : ℕ -> ℤ
+neg = \x . case x of
+  zero -> zer
+  succ n -> negOneMinus n
+
+test : (itimes (pos (2)) (pos (2))) = pos 4
+test = refl

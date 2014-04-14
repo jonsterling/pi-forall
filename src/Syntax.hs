@@ -46,28 +46,30 @@ data Term =
    | Type Int                           -- ^ universe level
    | Pi  Epsilon (Bind (TName, Embed Term) Term) -- ^ function type
 
+   | Quotient Term Term        -- ^ quotient type `A / R`
+   | QBox Term Annot           -- ^ quotient introduction `<x:Q>`
+   | QElim Term Term Term Term -- ^ quotient elimination
+
    -- practical matters for surface language
    | Ann Term Term         -- ^ Annotated terms `( x : A )`
-   | Paren Term            -- ^ parenthesized term, useful for printing
    | Pos SourcePos Term    -- ^ marked source position, for error messages
 
    -- conveniences
    | TrustMe Annot         -- ^ an axiom 'TRUSTME', inhabits all types
+   | Hole TName Annot
+
+   -- empty
+   | TyEmpty               -- ^ The type with no inhabitant
 
    -- unit
    | TyUnit                -- ^ The type with a single inhabitant `One`
    | LitUnit               -- ^ The inhabitant, written tt
 
-   -- boolean expressions
-   | TyBool
-   | LitBool Bool
-   | If Term Term Term Annot
+   | TySquash Term         -- ^ Squash types
 
-   -- homework let expression
    | Let Epsilon (Bind (TName, Embed Term) Term)
      -- ^ let expression, introduces a new definition in the ctx
 
-   -- homework sigma types
    | Sigma (Bind (TName, Embed Term) Term)
      -- ^ sigma type '{ x : A | B }'
    | Prod Term Term Annot
@@ -76,11 +78,14 @@ data Term =
      -- ^ elimination form  'pcase p of (x,y) -> p'
 
    -- equality
-   | TyEq Term Term     -- ^ Equality type  'a = b'
-   | Refl Annot         -- ^ Proof of equality
-   | Subst Term Term (Maybe (Bind TName Term))
-                        -- ^ equality elimination
+   | Refl Annot Term
+   | TyEq Term Term Annot Annot
+   | Subst Term Term (Maybe (Bind TName Term)) -- ^ equality elimination
    | Contra Term Annot  -- ^ witness to contradiction
+
+   -- tactics
+   | Trivial Annot
+   | Induction Annot [Term]
 
    -- inductive datatypes
    | TCon TCName [Term]      -- ^ type constructors (fully applied)
@@ -96,7 +101,7 @@ data Term =
    | PiC Epsilon (Bind (TName, Embed Term)
           (Term,Term))
       -- ^ constrained function type '[ x : Nat | x < y ] -> B'
-                 deriving (Show)
+   deriving Show
 
 -- | An 'Annot' is optional type information
 newtype Annot = Annot (Maybe Term) deriving Show
@@ -150,15 +155,11 @@ data Decl = Sig     TName  Term
           | Data    TCName Telescope Int [ConstructorDef]
             -- ^ Declaration for a datatype including all of
             -- its data constructors
-          | AbsData TCName Telescope Int
-            -- ^ An abstract view of a type constructor. Does
-            -- not include any information about its data
-            -- constructors
-  deriving (Show)
+  deriving Show
 
 -- | A Data constructor has a name and a telescope of arguments
 data ConstructorDef = ConstructorDef SourcePos DCName Telescope
-  deriving (Show)
+  deriving Show
 
 -------------
 -- * Telescopes
@@ -207,7 +208,6 @@ unPosFlaky t = fromMaybe (newPos "unknown location" 0 0) (unPosDeep t)
 -- | Is this the syntax of a literal (natural) number
 isNumeral :: Term -> Maybe Int
 isNumeral (Pos _ t) = isNumeral t
-isNumeral (Paren t) = isNumeral t
 isNumeral (DCon c [] _) | c== "Zero" = Just 0
 isNumeral (DCon c [Arg _ t] _) | c==  "Succ" =
   do n <- isNumeral t ; return (n+1)
@@ -234,24 +234,29 @@ instance Erase Term where
     where ((x,unembed -> _), body) = unsafeUnbind bnd
   erase (App a1 a2)     = App (erase a1) (erase a2)
   erase (Type i)        = Type i
+  erase (Quotient t r)  = Quotient (erase t) (erase r)
+  erase (QBox x _)      = QBox (erase x) noAnn
+  erase (QElim p s rsp q) = QElim (erase p) (erase s) (erase rsp) (erase q)
   erase (Pi ep bnd)     = Pi ep (bind (x, embed (erase tyA)) (erase tyB))
     where ((x,unembed -> tyA), tyB) = unsafeUnbind bnd
   erase (Ann t1 t2)     = erase t1
-  erase (Paren t1)      = erase t1
   erase (Pos sp t)      = erase t
   erase (TrustMe _)     = TrustMe noAnn
+  erase (Hole n _ )     = Hole n noAnn
   erase (TyUnit)        = TyUnit
+  erase (TySquash t)    = TySquash (erase t)
+  erase (TyEmpty)       = TyEmpty
   erase (LitUnit)       = LitUnit
-  erase (TyBool)        = TyBool
-  erase (LitBool b)     = LitBool b
-  erase (If a b c _)    = If (erase a) (erase b) (erase c) noAnn
   erase (Let ep bnd)    = case ep of
        Runtime -> Let Runtime (bind (x,embed (erase rhs)) (erase body))
        Erased  -> erase body
     where ((x,unembed -> rhs),body) = unsafeUnbind bnd
 
-  erase (TyEq a b)      = TyEq (erase a) (erase b)
-  erase (Refl _)        = Refl noAnn
+  erase (Refl _ p)        = Refl noAnn (erase p)
+  erase (Trivial _ )      = Trivial noAnn
+  erase (Induction _ xs)  = Induction noAnn (map erase xs)
+  erase (TyEq a b s t)  = TyEq (erase a) (erase b) noAnn noAnn
+
   -- DesignDecision: should we erase subst completely?
   -- could cause typechecker to loop if D = D -> D assumed
   erase (Subst tm pf _) = erase tm

@@ -15,14 +15,14 @@ import Equal
 
 import Unbound.LocallyNameless hiding (Data, Refl)
 import Control.Applicative ((<$>), (<*>), (<$), pure)
-import Control.Monad.Error
+import Control.Monad.Error hiding (ap)
 import Text.PrettyPrint.HughesPJ
 import Data.Maybe
 import Control.Monad.RWS.Lazy (MonadReader)
 import Data.List(nub)
 import qualified Data.Set as S
 import Unbound.LocallyNameless.Ops (unsafeUnbind)
-
+import Debug.Trace
 
 -- Type abbreviation for documentation
 type Type = Term
@@ -47,6 +47,50 @@ tcTerm :: Term -> Maybe Type -> TcMonad (Term,Type)
 
 tcTerm t@(Var x) Nothing = (t,) <$> lookupTy x
 tcTerm t@(Type i) Nothing = return (t, Type (i+1))
+
+tcTerm q@(Quotient t r) Nothing = do
+  (at, _) <- tcType t
+  (ar, rt) <- checkType r (Pi Runtime (bind (string2Name "x", embed t)
+                            (Pi Runtime (bind (string2Name "y", embed t)
+                              (Type 0)))))
+  return $ (q, Type 0)
+
+tcTerm sq@(TySquash a) Nothing = do
+  nsq <- whnf sq
+  tcTerm nsq Nothing
+
+
+tcTerm q@(QBox x (Annot mty)) Nothing = do
+  case mty of
+    Nothing -> err [DS "Could not infer type of quotient", DD q]
+    Just ty -> return (q, ty)
+
+tcTerm (QBox x ann1) ann2 = do
+  Just ty <- matchAnnots ann1 ann2
+  (carrier, rel) <- ensureQuotient ty
+  (ax, _) <- checkType x carrier
+  return $ (QBox ax (Annot $ Just ty), ty)
+
+tcTerm (QElim p s rsp q) Nothing = do
+  (aq, tyQ) <- inferType q
+  (carrier, rel) <- ensureQuotient tyQ
+
+  let varX = string2Name "x"
+  let varY = string2Name "Y"
+
+  tyPx <- whnf $ App p (Arg Runtime (QBox (Var varX) (Annot $ Just tyQ)))
+  tyPy <- whnf $ App p (Arg Runtime (QBox (Var varY) (Annot $ Just tyQ)))
+
+  (ap, tyP) <- checkType p (Pi Runtime (bind (varX, embed tyQ) (Type 0)))
+  (as, tyS) <- checkType s (Pi Runtime (bind (varX, embed carrier) tyPx))
+
+  (arsp, tyRsp) <- checkType rsp $ Pi Runtime $ bind (varX, embed carrier) $
+                                  (Pi Runtime (bind (varY, embed carrier)
+                                    (Pi Runtime (bind (string2Name "rpf", embed (App (App rel (Arg Runtime (Var varX))) (Arg Runtime (Var varY))))
+                                      (TyEq (App s (Arg Runtime (Var varX))) (App s (Arg Runtime (Var varY))) (Annot $ Just tyPx) (Annot $ Just tyPy))))))
+
+  nf <- whnf (App p (Arg Runtime q))
+  return (QElim ap as arsp aq, nf)
 
 tcTerm (Pi ep bnd) Nothing = do
   ((x, unembed -> tyA), tyB) <- unbind bnd
@@ -73,8 +117,7 @@ tcTerm (Lam ep1 bnd) (Just (Pi ep2 bnd2)) | ep1 == ep2 = do
 tcTerm (Lam ep1 _) (Just (Pi ep2 _))  =
   err [DS "Epsilon", DD ep1,
        DS "on lambda does not match expected", DD ep2]
-tcTerm (Lam _ bnd) (Just nf) =
-  err [DS "Lambda expression has a function type, not", DD nf]
+tcTerm e@(Lam _ bnd) (Just nf) = err [DS "Lambda expression has a function type, not", DD nf]
 
 -- infer the type of a lambda expression, when an annotation
 -- on the binder is present
@@ -101,7 +144,7 @@ tcTerm (App t1 (Arg ep2 t2)) Nothing = do
   unless (ep1 == ep2) $
     err [DD ep1, DS "argument supplied for", DD ep2, DS "function"]
 
-    -- if the function has a constrained type
+  -- if the function has a constrained type
   -- make sure that it is satisfied
   () <- case mc of
     Just constr@(Smaller b c) -> do
@@ -140,32 +183,17 @@ tcTerm (Ann tm ty) Nothing = do
   return (tm', ty'')
 
 tcTerm (Pos p tm) mTy = extendSourceLocation p tm $ tcTerm tm mTy
-tcTerm (Paren tm) mTy = tcTerm tm mTy
 
+tcTerm (Hole name ann1) ann2 = do
+  Just expectedTy <- matchAnnots ann1 ann2
+  return (Hole name (Annot (Just expectedTy)), expectedTy)
 tcTerm (TrustMe ann1) ann2 = do
   Just expectedTy <- matchAnnots ann1 ann2
   return (TrustMe (Annot (Just expectedTy)), expectedTy)
 
+tcTerm (TyEmpty) Nothing = return (TyEmpty, Type 0)
 tcTerm (TyUnit) Nothing = return (TyUnit, Type 0)
 tcTerm (LitUnit) Nothing = return (LitUnit, TyUnit)
-tcTerm (TyBool) Nothing = return (TyBool,Type 0)
-tcTerm (LitBool b) Nothing = return (LitBool b, TyBool)
-
-
-tcTerm (If t1 t2 t3 ann1) ann2 = do
-  (at1,_) <- checkType t1 TyBool
-  ann <- matchAnnots ann1 ann2
-  nf <- whnf at1
-  let ctx b = case nf of
-        Var x -> [Def x (LitBool b)]
-        _     -> []
-  case ann of
-    Just ty -> do
-      (at2, _) <- extendCtxs (ctx True) $ checkType t2 ty
-      (at3, _) <- extendCtxs (ctx False) $ checkType t3 ty
-      return (If at1 at2 at3 (Annot ann), ty)
-    Nothing -> err [DS "Annotation required"]
-
 
 tcTerm (Let ep bnd) ann = do
   ((x,unembed->rhs),body) <- unbind bnd
@@ -246,8 +274,7 @@ tcTerm (Case scrut alts ann1) ann2 = do
            (Just expectedTy) -> do
              -- add scrut = pat equation to the context.
              decls' <- equateWithPat scrut pat (TCon n params)
-             (ebody, _) <- extendCtxs (decls ++ decls') $
-               checkType body expectedTy
+             (ebody, _) <- extendCtxs (decls ++ decls') $ checkType body expectedTy
              return (ebody, expectedTy)
            Nothing -> -- extendCtxs decls $ inferType body
              err [DS "must be in checking mode for case"]
@@ -320,31 +347,92 @@ tcTerm (Ind ep1 bnd ann1) ann2 = do
     Nothing ->
       err [DS "Ind expression should be annotated with its type"]
 
+tcTerm t@(Induction ann1@(Annot ty1) ss) ann2 = do
+  ann@(Just ty) <- matchAnnots ann1 ann2
 
+  let performInduction [] = return $ Trivial (Annot ann)
+      performInduction (x:xs) = do
+        (x', xty) <- inferType x
+        (tcn, _) <- ensureTCon xty
+        (tele, _, Just dcons) <- lookupTCon tcn
 
-tcTerm (TyEq a b) Nothing = do
-  (aa,aTy) <- inferType a
-  (ab,bTy) <- checkType b aTy
-  return (TyEq aa ab, Type 0)
+        let patVars :: Telescope -> [(Pattern, Epsilon)]
+            patVars Empty = []
+            patVars (Cons e (unrebind->((n,_), tele'))) = (PatVar n, e) : patVars tele'
 
-tcTerm (Refl ann1) ann2 = do
+        let buildMatch :: ConstructorDef -> TcMonad Match
+            buildMatch (ConstructorDef _ dcn args) =
+              Match <$> bind (PatCon dcn (patVars args)) <$> (performInduction xs)
+
+        matches <- sequence $ buildMatch <$> dcons
+        return $ Case x matches (Annot ann)
+
+  switch <- performInduction ss
+  checkType switch ty
+
+tcTerm t@(Trivial ann1) ann2 = do
+  ann@(Just ty) <- matchAnnots ann1 ann2
+  nty <- whnf ty
+
+  let proofSearch = do
+        gam <- getCtx
+        let checkDecls ((Sig nm ty') : gs) =
+              do { mtm <- lookupDef nm
+                 ; (ntm, nty') <- (checkType (Contra (Var nm) (Annot ann)) nty) <|> (checkType (Var nm) nty)
+                 ; return $ (ntm, nty)
+                 } <|> checkDecls gs
+            checkDecls (_ : gs) = checkDecls gs
+            checkDecls [] = err [DS "Could not find suitable value of type", DD nty, DS "in context", DD gam]
+        checkDecls gam
+
+  let conventional =
+        case nty of
+          TyUnit ->
+            return (LitUnit, nty)
+          Pi ep bnd -> do
+            ((x, unembed -> tyA), tyB) <- unbind bnd
+            checkType (Lam ep (bind (x, embed (Annot Nothing)) (Trivial $ Annot Nothing))) nty
+          Sigma bnd -> do
+            ((x, unembed -> tyA), tyB) <- unbind bnd
+            checkType (Prod (Trivial $ Annot Nothing) (Trivial $ Annot Nothing) (Annot ann)) nty
+          TyEq x y (Annot (Just tyX)) (Annot (Just tyY)) -> do
+            Just ev <- resolveEq x y tyX tyY
+            checkType (Refl (Annot Nothing) (Trivial $ Annot $ Just ev)) nty
+          _ -> do
+            gam <- getLocalCtx
+            err [DS "Trivial tactic not effective for type", DD nty, DS "in context", DD gam]
+
+  conventional <|> proofSearch
+
+tcTerm (Refl ann1 evidence) ann2 = do
   ann <- matchAnnots ann1 ann2
   case ann of
-    (Just (TyEq a b)) ->
-      let ty = TyEq a b in
-      equate a b >> return (Refl $ Annot $ Just ty, ty)
-    (Just ty) -> err [DS "refl annotated with", DD ty]
-    Nothing   -> err [DS "refl requires annotation"]
+    Just ty@(TyEq a b (Annot (Just tyA)) (Annot (Just tyB))) -> do
+      mp <- resolveEq a b tyA tyB
+      case mp of
+        Just p -> do
+          (evidence', _) <- checkType evidence p
+          return (Refl (Annot ann) evidence', ty)
+        Nothing -> do
+          equate a b
+          return (Refl (Annot ann) evidence, ty)
+    _ -> err [DS "refl requires annotation", DD ann]
 
+tcTerm (TyEq a b (Annot mtyA) (Annot mtyB)) ann2 = do
+  (na, tyA) <- tcTerm a mtyA
+  (nb, tyB) <- tcTerm b mtyB
+  (_, i) <- tcType tyA
+  (_, j) <- tcType tyB
+  return (TyEq na nb (Annot $ Just tyA) (Annot $ Just tyB), Type (max i j))
 
 tcTerm (Subst tm p mbnd) Nothing = do
   -- infer the type of the proof p
   (apf, tp) <- inferType p
   -- make sure that it is an equality between m and n
   (m,n)     <- ensureTyEq tp
-  (m', n') <- case mbnd of
+  (m', n')  <- case mbnd of
     Just bnd -> do
-      (x, a)   <- unbind bnd
+      (x, a) <- unbind bnd
       -- ensure that m' and n' are good
       (m',_) <- tcType (subst x m a)
       (n',_) <- tcType (subst x n a)
@@ -365,8 +453,6 @@ tcTerm t@(Contra p ann1) ann2 =  do
       b' <- whnf b
       case (a',b') of
         (DCon da _ _, DCon db _ _) | da /= db ->
-          return (Contra apf (Annot (Just ty)), ty)
-        (LitBool b1, LitBool b2) | b1 /= b2 ->
           return (Contra apf (Annot (Just ty)), ty)
         (_,_) -> err [DS "I can't tell that", DD a, DS "and", DD b,
                       DS "are contradictory"]
@@ -492,12 +578,12 @@ merge ann (x : xs) = x <$ (equate <$> merge ann xs <*> pure x)
 -- | Create the binding in the context for each of the variables in
 -- the pattern.
 declarePat :: Pattern -> Epsilon -> Type -> TcMonad ([Decl], [TName])
-declarePat (PatVar x) ep ty@(TyEq (Var y) z) | y `notElem` fv z = do
-  mt <- lookupDef y
-  let ydef = case mt of
-        Nothing -> [Def y z]
-        Just _  -> []
-  return (Sig x ty : ydef, [x | ep == Erased])
+-- declarePat (PatVar x) ep ty@(TyEq (Var y) z) | y `notElem` fv z = do
+--   mt <- lookupDef y
+--   let ydef = case mt of
+--         Nothing -> [Def y z]
+--         Just _  -> []
+--   return (Sig x ty : ydef, [x | ep == Erased])
 declarePat (PatVar x) Runtime y = return ([Sig x y],[])
 declarePat (PatVar x) Erased  y = return ([Sig x y],[x])
 declarePat (PatCon d pats) Runtime (TCon c params) = do
@@ -546,6 +632,7 @@ pat2Term (PatVar x) ty = return (Var x)
 -- that are not variables or constructors applied to vars may not
 -- produce any equations.
 equateWithPat :: Term -> Pattern -> Type -> TcMonad [Decl]
+equateWithPat (Pos  _ x) pat ty = equateWithPat x pat ty
 equateWithPat (Var x) pat ty = (:[]) . Def x <$> pat2Term pat ty
 equateWithPat (DCon dc args _) (PatCon dc' pats) (TCon n params)
   | dc == dc' = do
@@ -648,7 +735,7 @@ tcEntry (Axiom n ty) = do
   return $ AddCtx [Sig n ety, Def n (TrustMe (Annot (Just ety)))]
 
 -- rule Decl_data
-tcEntry (Data t delta lev cs) =
+tcEntry decl@(Data t delta lev cs) =
   do -- Check that the telescope for the datatype definition is well-formed
      (edelta, i) <- tcTypeTele delta
      ---- check that the telescope provided
@@ -656,7 +743,7 @@ tcEntry (Data t delta lev cs) =
      ---  TODO: worry about universe levels also?
      let elabConstructorDef defn@(ConstructorDef pos d tele) =
             extendSourceLocation pos defn $
-              extendCtx (AbsData t edelta lev) $
+              extendCtx decl $
                 extendCtxTele edelta $ ConstructorDef pos d . fst <$> tcTypeTele tele
      ecs <- mapM elabConstructorDef cs
      -- check that types are strictly positive.
@@ -667,7 +754,6 @@ tcEntry (Data t delta lev cs) =
        err [DS "Datatype definition", DD t, DS"contains duplicated constructors" ]
      -- finally, add the datatype to the env and perform action m
      return $ AddCtx [Data t edelta lev ecs]
-tcEntry AbsData{} = err [DS "internal construct"]
 
 
 -- | Make sure that we don't have the same name twice in the
@@ -714,7 +800,6 @@ occursPositive  :: (Fresh m, MonadError Err m, MonadReader Env m) =>
 occursPositive tName (Pos p ty) =
   extendSourceLocation p ty $
     occursPositive tName ty
-occursPositive tName (Paren ty) = occursPositive tName ty
 occursPositive tName (Pi _ bnd) = do
   ((_,unembed->tyA), tyB) <- unbind bnd
   when (tName `S.member` fv tyA) $
@@ -794,7 +879,7 @@ relatedPats dc (pc@(PatVar _):pats) = ([], pc:pats)
 checkSubPats :: Telescope -> [[(Pattern,Epsilon)]] -> TcMonad ()
 checkSubPats Empty _ = return ()
 checkSubPats (Cons _ (unrebind->((name,unembed->tyP),tele))) patss
-  | not (null patss) = do
+  | not (null (concat patss)) = do
   let hds = map (fst . head) patss
   let tls = map tail patss
   case hds of

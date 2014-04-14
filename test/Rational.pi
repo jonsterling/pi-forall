@@ -1,0 +1,55 @@
+module Quotient where
+
+import Integer
+import Nat
+
+ℕ⁺ : Type
+ℕ⁺ = {d : ℕ & [d = zero] -> Zero}
+
+PreRational : Type
+PreRational = {n : ℤ & ℕ⁺}
+
+~ℚ : PreRational -> PreRational -> Type
+~ℚ = \p q. pcase p of
+  (n, dp) -> pcase q of
+  (n', dp') -> pcase dp of
+  (d, dnz) -> pcase dp' of
+  (d', dnz') -> (itimes n (pos d')) = (itimes n' (pos d))
+
+ℚ : Type
+ℚ = PreRational // ~ℚ
+
+oneHalf : ℚ
+oneHalf = <(pos 1, (2, \[p]. contra p))>
+
+twoFourths : ℚ
+twoFourths = <(pos 2, (4, \[p]. contra p))>
+
+oneHalfEqualsTwoFourths : oneHalf = twoFourths
+oneHalfEqualsTwoFourths = refl _
+
+numerator' : PreRational -> ℤ
+numerator' = \p. pcase p of (n, d) -> n
+
+denominator' : PreRational -> ℕ⁺
+denominator' = \p. pcase p of (n, d) -> d
+
+-- There is no continuous function to extract the numerator from a ℚ,
+-- since it might either be positive or negative, depending on the denominator.
+-- It is only possible to observe components of a ℚ simultaneously.
+
+--   numeratorResp : (x : PreRational) (y : PreRational) (pf : RatEquiv x y) -> (numerator' x) = (numerator' y)
+--   numeratorResp = {?help}
+--
+--   numerator : ℚ -> ℤ
+--   numerator = \x . expose x under (\r. ℤ) with numerator' by numeratorResp
+--
+-- But you can use squash types to say that there *merely exists* a
+-- numerator and a nonzero denominator.
+
+numerator : ℚ -> [|ℤ|]
+numerator = \q. expose q under (\x. [|ℤ|]) with (\x. <numerator' x>) by (\x y x~y. _)
+
+denominator : ℚ -> [|ℕ⁺|]
+denominator = \q. expose q under (\x. [|ℕ⁺|]) with (\x. <denominator' x>) by (\x y x~y. _)
+

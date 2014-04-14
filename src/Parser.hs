@@ -46,27 +46,34 @@ Optional components in this BNF are marked with < >
     | a b                      Application
     | (x : A) -> B             Pi type
 
+    | A / R                    Quotient type
+    | <x:Q>                    Quotient introduction
+    | expose x P p rsp         Quotient elimination
+
+        expose : (P : A / R -> Type i) (s : (a : A) -> P <a>) (rsp : (x : A) (y : A) -> R x y -> (s x = s y)) (x : A / R) -> P x
+
     | (a : A)                  Annotations
     | (a)                      Parens
     | TRUSTME                  An axiom 'TRUSTME', inhabits all types
+    | {?x}                     A hole named x
 
     | let x = a in b           Let expression
 
+    | Zero                     Empty type
     | One                      Unit type
     | tt                       Unit value
-
-    | Bool                     Boolean type
-    | True | False             Boolean values
-    | if a then b else c       If
 
     | { x : A | B }            Dependent pair type
     | (a, b)                   Prod introduction
     | pcase a of (x,y) -> b    Prod elimination
 
     | a = b                    Equality type
-    | refl                     Equality proof
     | subst a by b <at x.c>    Type conversion
     | contra a                 Contra
+    | refl p                   Equality proof with evidence
+
+    | trivial                  Trivial tactic
+    | induction [x,...y]       Induction tactic
 
     | C a ...                  Type / Term constructors
     | case a [y] of            Pattern matching
@@ -176,8 +183,8 @@ trellysStyle = Token.LanguageDef
                 , Token.commentEnd     = "-}"
                 , Token.commentLine    = "--"
                 , Token.nestedComments = True
-                , Token.identStart     = letter
-                , Token.identLetter    = alphaNum <|> oneOf "_'"
+                , Token.identStart     = letter <|> oneOf "~"
+                , Token.identLetter    = alphaNum <|> oneOf "_'⁺~"
                 , Token.opStart	       = oneOf ":!#$%&*+.,/<=>?@\\^|-"
                 , Token.opLetter       = oneOf ":!#$%&*+.,/<=>?@\\^|-"
                 , Token.caseSensitive  = True
@@ -190,6 +197,8 @@ trellysStyle = Token.LanguageDef
                   ,"case"
                   ,"of"
                   ,"with"
+                  ,"under"
+                  ,"by"
                   ,"contra"
                   ,"subst", "by", "at"
                   ,"let", "in"
@@ -197,13 +206,14 @@ trellysStyle = Token.LanguageDef
                   ,"erased"
                   ,"TRUSTME"
                   ,"ord"
-                  , "pcase"
-                  , "Bool", "True", "False"
-                  ,"if","then","else"
-                  , "One", "tt"
+                  ,"pcase"
+                  ,"expose"
+                  ,"trivial"
+                  ,"induction"
+                  ,"Zero","One", "tt"
                   ]
                , Token.reservedOpNames =
-                 ["!","?","\\",":",".",",","<", "=", "+", "-", "^", "()", "_","|","{", "}"]
+                 ["!","?","\\",":",".",",","<", "=", "+", "-", "^", "()", "_", "[|", "|]", "|", "{", "}"]
                 }
 
 tokenizer :: Token.GenTokenParser String [Column] (StateT ConstructorNames FreshM)
@@ -271,10 +281,10 @@ reserved,reservedOp :: String -> LParser ()
 reserved = Token.reserved tokenizer
 reservedOp = Token.reservedOp tokenizer
 
-parens,brackets :: LParser a -> LParser a
+parens,brackets,braces :: LParser a -> LParser a
 parens = Token.parens tokenizer
 brackets = Token.brackets tokenizer
--- braces = Token.braces tokenizer
+braces = Token.braces tokenizer
 
 natural :: LParser Int
 natural = fromInteger <$> Token.natural tokenizer
@@ -283,9 +293,9 @@ natenc :: LParser Term
 natenc =
   do n <- natural
      return $ encode n
-   where encode 0 = DCon "Zero" [] natty
-         encode n = DCon "Succ" [Arg Runtime (encode (n-1))] natty
-         natty    = Annot $ Just (TCon (string2Name "Nat") [])
+   where encode 0 = DCon "zero" [] natty
+         encode n = DCon "succ" [Arg Runtime (encode (n-1))] natty
+         natty    = Annot $ Just (TCon (string2Name "ℕ") [])
 
 moduleImports :: LParser Module
 moduleImports = do
@@ -377,8 +387,25 @@ indDef = do
 trustme :: LParser Term
 trustme = TrustMe (Annot Nothing) <$ reserved "TRUSTME"
 
+hole :: LParser Term
+hole = Hole <$> name <*> return (Annot Nothing)
+  where
+    name = braces $ string2Name <$> (reservedOp "?" *> many (noneOf "{}"))
+
+trivialTactic :: LParser Term
+trivialTactic = Trivial (Annot Nothing) <$ (reserved "trivial" <|> reservedOp "_")
+
+inductionTactic :: LParser Term
+inductionTactic = reserved "induction" *> (Induction (Annot Nothing) <$> brackets scrutinees)
+  where
+    scrutinees = expr `sepBy1` comma
+
 refl :: LParser Term
-refl = Refl (Annot Nothing) <$ reserved "refl"
+refl = do
+  reserved "refl"
+  evidence <- option LitUnit expr
+  annot <- optionMaybe (colon >> expr)
+  return $ Refl (Annot annot) evidence
 
 -- Expressions
 
@@ -387,11 +414,13 @@ expr,term,factor :: LParser Term
 -- expr is the toplevel expression grammar
 expr = Pos <$> getPosition <*> buildExpressionParser table term
   where table = [[ifix  AssocLeft "<" Smaller],
-                 [ifix  AssocLeft "=" TyEq],
+                 [ifix  AssocLeft "=" mkEq],
+                 [ifix  AssocLeft "//" Quotient],
                  [ifixM AssocRight "->" mkArrow]
                 ]
         ifix  assoc op f = Infix (reservedOp op >> return f) assoc
         ifixM assoc op f = Infix (reservedOp op >> f) assoc
+        mkEq a b = TyEq a b (Annot Nothing) (Annot Nothing)
         mkArrow  =
           do n <- fresh wildcardName
              return $ \tyA tyB ->
@@ -429,14 +458,19 @@ factor = choice [ varOrCon   <?> "a variable or nullary data constructor"
                 , contra     <?> "a contra"
                 , caseExpr   <?> "a case"
                 , pcaseExpr  <?> "a pcase"
+                , exposeExpr <?> "an expose"
+                , sigmaTy    <?> "a sigma type"
+                , squashTy   <?> "a squash type"
+                , qboxExpr   <?> "a quotient box"
                 , substExpr  <?> "a subst"
                 , ordax      <?> "ord"
                 , refl       <?> "refl"
+                , trivialTactic <?> "the trivial tactic"
+                , inductionTactic <?> "the induction tactic"
                 , trustme    <?> "TRUSTME"
+                , hole       <?> "hole"
                 , impProd    <?> "an implicit function type"
                 , bconst     <?> "a constant"
-                , ifExpr     <?> "an if expression"
-                , sigmaTy    <?> "a sigma type"
                 , expProdOrAnnotOrParens
                     <?> "an explicit function type or annotated expression"
                 ]
@@ -493,19 +527,9 @@ ind = do
 
 
 bconst  :: LParser Term
-bconst = choice [TyBool <$ reserved "Bool",
-                 LitBool False <$ reserved "False",
-                 LitBool True <$ reserved "True",
+bconst = choice [TyEmpty <$ reserved "Zero",
                  TyUnit <$ reserved "One",
                  LitUnit <$ reserved "tt"]
-
-ifExpr :: LParser Term
-ifExpr = If
-     <$> (reserved "if" *> expr)
-     <*> (reserved "then" *> expr)
-     <*> (reserved "else" *> expr)
-     <*> return (Annot Nothing)
-
 --
 letExpr :: LParser Term
 letExpr =
@@ -522,16 +546,33 @@ letExpr =
 impProd :: LParser Term
 impProd =
   do (x,tyA, mc) <- brackets
-       (try ((,,) <$> variable <*> (colon >> expr) <*> constraint)
-        <|> ((,,) <$> fresh wildcardName <*> expr) <*> constraint)
+       (try ((,,) <$> variable <*> (colon >> expr) <*> return Nothing)
+        <|> ((,,) <$> fresh wildcardName <*> expr) <*> return Nothing)
      optional (reservedOp "->")
      tyB <- expr
      return $ case mc of
        Just c  -> PiC Erased (bind (x,embed tyA) (c,tyB))
        Nothing -> Pi Erased (bind (x,embed tyA) tyB)
 
-constraint :: LParser (Maybe Term)
-constraint = option Nothing $ reservedOp "|" >> Just <$> expr
+qboxExpr :: LParser Term
+qboxExpr = do
+  reservedOp "<"
+  x <- expr
+  mty <- optionMaybe (reservedOp ":" *> expr)
+  reservedOp ">"
+  return $ QBox x (Annot $ mty)
+
+exposeExpr :: LParser Term
+exposeExpr = do
+  reserved "expose"
+  q <- expr
+  reserved "under"
+  p <- expr
+  reserved "with"
+  s <- expr
+  reserved "by"
+  rsp <- expr
+  return $ QElim p s rsp q
 
 -- Function types have the syntax '(x:A) -> B'.  This production deals
 -- with the ambiguity caused because these types, annotations and
@@ -563,7 +604,7 @@ expProdOrAnnotOrParens =
                   (Pi Runtime <$> (bind (x, embed a) <$> afterBinder))
          Colon a b -> return $ Ann a b
          Comma a b -> return $ Prod a b (Annot Nothing)
-         Nope a    -> return $ Paren a
+         Nope a    -> return $ a
 
 pattern :: LParser Pattern
 -- Note that 'dconstructor' and 'variable' overlaps, annoyingly.
@@ -622,13 +663,18 @@ substExpr = do
 contra :: LParser Term
 contra = Contra <$> (reserved "contra" *> expr) <*> return (Annot Nothing)
 
+squashTy :: LParser Term
+squashTy = do
+  x <- between (reservedOp "[|") (reservedOp "|]") expr
+  return (TySquash x) <?> "Squash"
+
 sigmaTy :: LParser Term
 sigmaTy = do
   reservedOp "{"
   x <- variable
   colon
   a <- expr
-  reservedOp "|"
+  reservedOp "&"
   b <- expr
   reservedOp "}"
   return (Sigma (bind (x, embed a) b))
